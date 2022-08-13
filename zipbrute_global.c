@@ -1,6 +1,9 @@
 // $Id: zipbrute_global.c,v 1.3 2001/10/14 13:35:45 thomas Exp $
 
 #include <sys/types.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/utsname.h>
 #include <errno.h>
 
@@ -29,15 +32,22 @@ int zipbrute_crack_i586(pwgen_handle_t*,char*);
 int zipbrute_crack_i686(pwgen_handle_t*,char*);
 
 zipbrute_method_t zipbrute_methods[] = {
+  #if 0
 	{"i386", zipbrute_crack_i386 },
 	{"i486", zipbrute_crack_i486 },
 	{"i586", zipbrute_crack_i586 },
 	{"i686", zipbrute_crack_i686 },
+#endif
 	{"x86_64", zipbrute_crack_i686 },
 	{"NULL" },
 };
 
 #if 1
+
+zipfile_t *zipfile_open(const char *filename);
+size_t zipfile_cread(char*buffer, size_t size,int pos,zipfile_file_t*zff);
+zipfile_file_t *zipfile_getfile(zipfile_t *zf, int *c);
+
 
 /*
  * 

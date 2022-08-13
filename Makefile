@@ -1,7 +1,7 @@
 # $id$
 
 CC=gcc
-CFLAGS=-g #-O6 -fomit-frame-pointer  #-fprofile-arcs -ftest-coverage -fno-inline -pg
+CFLAGS=-g -O6 -fomit-frame-pointer  #-fprofile-arcs -ftest-coverage -fno-inline -pg
 PVM_CFLAGS=-DPVM=1 $(CFLAGS)
 
 CXX=g++
@@ -44,15 +44,12 @@ zipbrute_i586.o zipbrute_i586.s: zipbrute_arch.c zipbrute.c
 #	mv zipbrute_arch.s zipbrute_i586.s
 #	rm zipbrute_arch.i
 zipbrute_i686.o zipbrute_i686.s: zipbrute_arch.c zipbrute.c
-	$(CC) $(CFLAGS) -DZB_ARCH=I686 -march=i686 -c -o $@ $<
+	$(CC) $(CFLAGS) -DZB_ARCH=I686 -march=native -c -o $@ $<
 #	$(CC) $(CFLAGS) -save-temps -DZB_ARCH=I686 -march=i686 -c -o $@ $<
 #	mv zipbrute_arch.s zipbrute_i686.s
 #	rm zipbrute_arch.i
 ZIPBRUTE_CORE=zip.o \
 zipbrute_global.o \
-zipbrute_i386.o \
-zipbrute_i486.o \
-zipbrute_i586.o \
 zipbrute_i686.o
 #----#
 pvm_main.o: pvm_main.c

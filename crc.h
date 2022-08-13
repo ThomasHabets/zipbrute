@@ -6,4 +6,4 @@
 #define CRC32(x,c)      (((x)>>8)^crctab[((x)^(c))&0xff])
 #define INVCRC32(x,c)   (((x)<<8)^crcinvtab[((x)>>24)&0xff]^((c)&0xff))
 
-u_int32_t crctab[256], crcinvtab[256];
+extern u_int32_t crctab[256], crcinvtab[256];

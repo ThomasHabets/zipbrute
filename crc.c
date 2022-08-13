@@ -1,5 +1,6 @@
 // $Id: crc.c,v 1.1 2001/04/23 17:53:52 thomas Exp $
 #include "crc.h"
+u_int32_t crctab[256], crcinvtab[256];
 void crc_init(void)
 {
 	unsigned int i, j, c;
