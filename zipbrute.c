@@ -53,7 +53,12 @@ int zipbrute_crack(pwgen_handle_t *state, char *password)
 	do { // 92.5% of execution is in this loop
 		n++;
 #if USE_CACHE
-		if (change > 1) {
+		if (__builtin_expect(change == 1, 1)) {
+			key[0] = ckey[0];
+			key[1] = ckey[1];
+			key[2] = ckey[2];
+			key3 = ckey3;
+		  } else {
 			key[0] = 0x12345678;
 			key[1] = 0x23456789;
 			key[2] = 0x34567890;
@@ -65,11 +70,6 @@ int zipbrute_crack(pwgen_handle_t *state, char *password)
 			ckey[1] = key[1];
 			ckey[2] = key[2];
 			ckey3 = key3;
-		} else {
-			key[0] = ckey[0];
-			key[1] = ckey[1];
-			key[2] = ckey[2];
-			key3 = ckey3;
 		}
 		updatekeys(password[cachepos]);
 #else
