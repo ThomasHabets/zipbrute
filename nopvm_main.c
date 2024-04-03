@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <string.h>
 #include <ctype.h>
+#include <locale.h>
 
 #include "pwgen.h"
 #include "crc.h"
@@ -45,14 +46,15 @@ static void usage(const char *app, int ret)
 	exit(ret);
 }
 
-static void sigint(int a)
+static void sigalarm(int a)
 {
 	int c;
 	static int last = 0;
 	printf("\r%80s", "");
 
-	printf("\rProgress (%.2f / %.2f = %6.2f %%, %.0f c/s): ",
-	       log10(state->gencount), log10(state->total),
+	printf("\rProgress (%'llu / %'llu = %6.2f %%, %'.0f c/s): ",
+	       (long long unsigned)state->gencount,
+	       (long long unsigned)state->total,
 	       100*pow(10, log10(state->gencount) - log10(state->total)),
 	       (float)(state->gencount-last)/(float)waitstatustime);
 	for (c = 0; pwbuf[c] && c < 10; c++) {
@@ -75,7 +77,7 @@ int main(int argc, char **argv)
 	int length = 5;
 	int c;
 	enum { null, dictionary, incremental } generator = null;
-
+	setlocale(LC_NUMERIC, "");
 	crc_init();
 	
 	while ((c = getopt(argc, argv, "hi:d:vqp:")) != EOF) {
@@ -127,7 +129,7 @@ int main(int argc, char **argv)
 	}
 	infile = argv[optind];
 
-	signal(SIGALRM, sigint);
+	signal(SIGALRM, sigalarm);
 
 	switch(generator) {
 	case dictionary:
