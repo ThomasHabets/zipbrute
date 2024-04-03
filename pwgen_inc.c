@@ -298,7 +298,7 @@ int pwgen_inc(pwgen_handle_t *_state, char *password)
 		state->charindex[ptr] = 0;
 		password[ptr] = state->charset[ptr][0];
 		ptr--;
-		fflush(stdout);
+		//fflush(stdout);
 	}
 	state->gencount++;
 	return changecount;

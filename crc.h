@@ -7,3 +7,4 @@
 #define INVCRC32(x,c)   (((x)<<8)^crcinvtab[((x)>>24)&0xff]^((c)&0xff))
 
 extern u_int32_t crctab[256], crcinvtab[256];
+void crc_init(void);

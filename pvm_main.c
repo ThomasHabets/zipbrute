@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <string.h>
 
 #include <pvm3.h>
 
@@ -17,6 +18,10 @@ static int verbose_slave_print_charset = 0;
 static int verbose_master_print_slave_report = 0;
 
 unsigned int waitstatustime = 1;
+
+int pvmzipbrute_send(int ntask, int *tids);
+void pvmzipbrute_sendblock(char *charset, int tid);
+int pvmzipbrute_load(void);
 
 /*
  * atexit() function for master and slave

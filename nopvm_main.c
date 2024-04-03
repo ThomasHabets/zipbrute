@@ -5,6 +5,8 @@
 #include <signal.h>
 #include <math.h>
 #include <sys/types.h>
+#include <string.h>
+#include <ctype.h>
 
 #include "pwgen.h"
 #include "crc.h"
@@ -15,7 +17,7 @@ pwgen_handle_t *state;
 unsigned int waitstatustime = 1;
 char *pwbuf;
 int use_unzip = 0;
-
+int zipbrute_load(const char *_filename);
 /*
  *
  */

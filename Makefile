@@ -1,7 +1,7 @@
 # $id$
 
 CC=gcc
-CFLAGS=-g -O6 -fomit-frame-pointer  #-fprofile-arcs -ftest-coverage -fno-inline -pg
+CFLAGS=-g -O6 -fomit-frame-pointer -march=native -mtune=native  #-fprofile-arcs -ftest-coverage -fno-inline -pg
 PVM_CFLAGS=-DPVM=1 $(CFLAGS)
 
 CXX=g++

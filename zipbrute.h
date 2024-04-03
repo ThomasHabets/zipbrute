@@ -48,8 +48,8 @@ typedef struct zipbrute_method_s {
 
 extern int zipbrute_possible(pwgen_handle_t*,const char *password);
 extern zipbrute_method_t zipbrute_methods[];
-//void pvmzipbrute_possible(const char *password);
-//int zipbrute_load(const char *_filename);
-//int zipbrute_crack(pwgen_handle_t *state, char *password);
+void pvmzipbrute_possible(const char *password);
+int zipbrute_load(const char *_filename);
+int zipbrute_crack(pwgen_handle_t *state, char *password);
 
 #endif
