@@ -51,9 +51,6 @@ int zipbrute_crack(pwgen_handle_t *state, char *password)
 	int len;
 
 	do { // 92.5% of execution is in this loop
-#if 1 // profiling
-		//printf("Testing password %s\n", password);
-		//fflush(stdout);
 		n++;
 #if USE_CACHE
 		if (change > 1) {
@@ -86,9 +83,6 @@ int zipbrute_crack(pwgen_handle_t *state, char *password)
 		/*
 		 * key[] and key3 is now set up properly for the key
 		 */	
-//		printf("preinl> %.8x %.8x %.8x %.2x\n",
-		//key[0], key[1], key[2], key3);
-//		fflush(stdout);
 		/*
 		 * Now it's time to check all the files
 		 * NOTE that this loop is like 85-90 percent of execution time
@@ -104,13 +98,9 @@ int zipbrute_crack(pwgen_handle_t *state, char *password)
 			for (decC = 0; decC < 11; decC++) {
 				updatetkeys(filedata[file][decC] ^ tkey3);
 			}
-//			printf("%.8x %.8x %.8x %.2x\n",
-//			       tkey[0], tkey[1], tkey[2], tkey3);
 
 			if (fileheaders[file]
 			    != (char)(filedata[file][11] ^ tkey3)) {
-//				printf("Wrong key\n");
-				// wrong key
 				break;
 			}
 		}
@@ -119,9 +109,7 @@ int zipbrute_crack(pwgen_handle_t *state, char *password)
 				//return 1;
 			}
 		}
-#endif // profiling stuff
 	} while (change = state->pwgen(state, password));
-//	printf("%d\n", n);
 	return 0;
 }
 #endif
