@@ -26,10 +26,7 @@ static u_int32_t multi_magic = 0x504b0708;
 static u_int32_t end_magic = 0x504b0102;
 static u_int32_t zipmagic = 0x504b0304;
 
-int zipbrute_crack_i386(pwgen_handle_t*,char*);
-int zipbrute_crack_i486(pwgen_handle_t*,char*);
-int zipbrute_crack_i586(pwgen_handle_t*,char*);
-int zipbrute_crack_i686(pwgen_handle_t*,char*);
+int zipbrute_crack_backend(pwgen_handle_t*,char*);
 
 zipbrute_method_t zipbrute_methods[] = {
   #if 0
@@ -37,8 +34,8 @@ zipbrute_method_t zipbrute_methods[] = {
 	{"i486", zipbrute_crack_i486 },
 	{"i586", zipbrute_crack_i586 },
 	{"i686", zipbrute_crack_i686 },
-#endif
 	{"x86_64", zipbrute_crack_i686 },
+#endif
 	{"NULL" },
 };
 
@@ -175,6 +172,7 @@ int zipbrute_crack(pwgen_handle_t *state, char *pwbuf)
 			return zipbrute_methods[c].crack(state, pwbuf);
 		}
 	}
+	return zipbrute_crack_backend(state, pwbuf);
 	fprintf(stderr, "Unable to find suitable cracker for machine %s\n",
 		ut.machine);
 	exit(1);

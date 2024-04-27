@@ -10,9 +10,13 @@
 #include "crc.h"
 #include "zip.h"
 
+static u_int32_t key[3];
+static u_int8_t key3;
+static u_int8_t tkey3;
+static u_int32_t tkey[3];
+
 #define USE_CACHE 1
 
-#if ZB_updatekeys
 static void updatekeys(u_int8_t byte)
 {
 	u_int32_t temp;
@@ -22,9 +26,7 @@ static void updatekeys(u_int8_t byte)
 	temp = (key[2] & 0xffff) | 3;
 	key3 = ((temp * (temp ^ 1)) >> 8) & 0xff;
 }
-#endif
 
-#if ZB_updatetkeys
 static void updatetkeys(u_int8_t byte)
 {
 	u_int32_t temp;
@@ -34,10 +36,8 @@ static void updatetkeys(u_int8_t byte)
 	temp = (tkey[2] & 0xffff) | 3;
 	tkey3 = ((temp * (temp ^ 1)) >> 8) & 0xff;
 }
-#endif
 
-#if ZB_zipbrute_crack
-int zipbrute_crack(pwgen_handle_t *state, char *password)
+int zipbrute_crack_backend(pwgen_handle_t *state, char *password)
 {
 	int change = 99;
 	int n = 0;
@@ -112,4 +112,3 @@ int zipbrute_crack(pwgen_handle_t *state, char *password)
 	} while (change = state->pwgen(state, password));
 	return 0;
 }
-#endif
