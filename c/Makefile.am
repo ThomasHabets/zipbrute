@@ -3,7 +3,12 @@ DISTCLEANFILES=*~
 
 include_HEADERS=src/zipbrute.h
 
-bin_PROGRAMS=zipbrute
+bin_PROGRAMS=zipbrute pwgen
+
+pwgen_SOURCES=\
+src/pwgen.c \
+src/pwgen_inc.c \
+src/pwgen_dict.c
 
 zipbrute_SOURCES=\
 src/crc.c \

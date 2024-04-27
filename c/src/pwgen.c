@@ -35,6 +35,7 @@ int main(int argc, char **argv)
 		}
 	}
 	if (generator == null || optind + 1 != argc) {
+	  fprintf(stderr, "Need to specify a generator and another arg\n");
 		return 1;
 	}
 
