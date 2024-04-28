@@ -3,34 +3,31 @@ use anyhow::Result;
 use clap::Parser;
 use std::io::BufRead;
 use std::path::Path;
+use std::simd::cmp::SimdPartialEq;
+use std::simd::num::SimdUint;
 use std::sync::mpsc;
-
-#[derive(Parser, Debug)]
-struct Opt {
-    #[clap(long, default_value = "")]
-    pattern: Option<String>,
-
-    #[clap(short, long)]
-    length: Option<u8>,
-
-    #[clap(short, long, default_value = "1")]
-    threads: usize,
-
-    #[clap(short)]
-    filename: String,
-
-    #[clap(long, default_value = "simd")]
-    engine: String,
-}
 
 const K0: u32 = 0x12345678;
 const K1: u32 = 0x23456789;
 const K2: u32 = 0x34567890;
 const MAX_CHECKS: u64 = 50_000_000;
+static ALL_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
 
+type Batch = std::simd::u32x16;
+type Mask = std::simd::mask32x16;
+
+// Non-SIMD CRC calculation.
 fn crc32(x: u32, c: u8) -> u32 {
     let idx: usize = ((x as u8) ^ c) as usize;
     (x >> 8) ^ CRCTAB[idx]
+}
+
+// SIMD CRC calculation.
+fn crc32_simd(x: Batch, c: Batch) -> Batch {
+    let ff = Batch::splat(0xff);
+    let idx = (x ^ c) & ff;
+    let idx = idx.cast::<usize>();
+    (x >> 8) ^ Batch::gather_or_default(&CRCTAB, idx)
 }
 
 const CRCTAB: [u32; 256] = [
@@ -80,6 +77,7 @@ enum Generator {
     Pattern(String),
 }
 
+// Non-SIMD key state. Updated every password character.
 #[derive(Default, Clone, Copy)]
 struct KeyState {
     key: [u32; 3],
@@ -109,10 +107,16 @@ impl KeyState {
 }
 
 trait PWGen {
+    /// Generate the next password.
     fn next(&mut self) -> (&[u8], bool, bool);
+
+    /// Get the password in string form.
     fn to_string(&self) -> String;
+
+    /// Get the possible characters for the last position.
     fn last_char(&self) -> Vec<u8>;
 }
+
 struct PWGenLowerCase {
     state: Vec<u8>,
 }
@@ -129,9 +133,11 @@ impl PWGenLowerCase {
         }
     }
 }
+
 impl PWGen for PWGenLowerCase {
     fn next(&mut self) -> (&[u8], bool, bool) {
-        // TODO: this actually skips the first password.
+        // TODO: this actually skips the first password, so the
+        // password had better not be "aaaaaa".
         let mut pos = self.state.len() - 1;
         let mut change = false;
         self.state[pos] += 1;
@@ -158,13 +164,15 @@ impl PWGen for PWGenLowerCase {
     }
 }
 
-static ALL_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
+// Pattern is meant to allow more than just a period for wildcard, but
+// not implemented yet.
 struct PWGenPattern {
     pattern: String,
     state: Vec<u8>,
     nxt: Vec<u8>,
     chars: Vec<Vec<u8>>,
 }
+
 impl PWGenPattern {
     fn new(pattern: &str) -> Self {
         let n = pattern.len();
@@ -193,6 +201,7 @@ impl PWGenPattern {
         PWGenPattern::new(&self.pattern[..self.pattern.len() - 1])
     }
 }
+
 impl PWGen for PWGenPattern {
     fn next(&mut self) -> (&[u8], bool, bool) {
         let len = self.state.len();
@@ -220,15 +229,11 @@ impl PWGen for PWGenPattern {
         String::from_utf8(self.nxt.clone()).unwrap()
     }
     fn last_char(&self) -> Vec<u8> {
-        // TODO
-        let mut ret = vec![];
-        for ch in ALL_CHARS {
-            ret.push(*ch);
-        }
-        ret
+        self.chars[self.chars.len() - 1].clone()
     }
 }
 
+// Non-SIMD crack function.
 fn crack(
     filedata: &[&[u8]],
     fileheaders: &[u8],
@@ -247,7 +252,6 @@ fn crack(
             return n;
         }
         //eprintln!("Testing {pw:?}");
-        //if n > 20_000_000 {
         if n > MAX_CHECKS {
             return n;
         }
@@ -283,24 +287,13 @@ fn crack(
     }
 }
 
-type Batch = std::simd::u32x16;
-type Mask = std::simd::mask32x16;
-
+// SIMD password state. Updated after every password character.
 #[derive(Default, Clone, Copy)]
 struct SKeyState {
     key0: Batch,
     key1: Batch,
     key2: Batch,
     key3: Batch,
-}
-use std::simd::cmp::SimdPartialEq;
-use std::simd::num::SimdUint;
-
-fn crcs(x: Batch, c: Batch) -> Batch {
-    let ff = Batch::splat(0xff);
-    let idx = (x ^ c) & ff;
-    let idx = idx.cast::<usize>();
-    (x >> 8) ^ Batch::gather_or_default(&CRCTAB, idx)
 }
 
 impl SKeyState {
@@ -313,15 +306,17 @@ impl SKeyState {
         let three = Batch::splat(3);
 
         // table lookup
-        self.key0 = crcs(self.key0, byte);
+        self.key0 = crc32_simd(self.key0, byte);
         let t = self.key1 + (self.key0 & ff);
         self.key1 = t * magic + one;
-        self.key2 = crcs(self.key2, (self.key1 >> 24) & ff);
+        self.key2 = crc32_simd(self.key2, (self.key1 >> 24) & ff);
         let temp = (self.key2 & ffff) | three;
         self.key3 = ((temp * (temp ^ one)) >> 8) & ff;
     }
 }
 
+// SIMD password cracker.
+//
 // TODO: the last char is so cheap to check, that it's probably faster
 // to Simd over the *second* to last character instead.
 fn crack_simd(
@@ -352,7 +347,6 @@ fn crack_simd(
 
     loop {
         let (pw, change, done) = password.next();
-        //assert_eq!(pw.len(), 2);
         //println!("pw: {pw:?}");
         if done {
             return n;
@@ -428,6 +422,13 @@ fn crack_simd(
     }
 }
 
+// Load relevant zip file data. We don't need the whole zip file.
+//
+// The format is:
+// * One row per file in the zip archive.
+// * Every line has 13 hex numbers.
+// * First the `head` byte.
+// * The rest is file data.
 fn load_file_data(path: &Path) -> Result<(Vec<[u8; 12]>, Vec<u8>)> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
@@ -455,26 +456,46 @@ fn load_file_data(path: &Path) -> Result<(Vec<[u8; 12]>, Vec<u8>)> {
     Ok((data, head))
 }
 
+#[derive(Parser, Debug)]
+struct Opt {
+    #[clap(short, long)]
+    pattern: Option<String>,
+
+    #[clap(short, long)]
+    length: Option<u8>,
+
+    #[clap(short, long, default_value = "1")]
+    threads: usize,
+
+    #[clap(short)]
+    filename: String,
+
+    #[clap(long, default_value = "simd")]
+    engine: String,
+}
+
 fn main() -> Result<()> {
     let opt = Opt::parse();
 
-    // Runtime env. TODO: make cmdline options.
     let engine = match opt.engine.to_lowercase().as_str() {
         "plain" => Engine::Plain,
         "simd" => Engine::Simd,
-        _ => panic!(),
+        _ => panic!("Only engines are SIMD and plain"),
     };
     let generator = match (opt.length, opt.pattern) {
-        (Some(n), _) => Generator::LowerCase(n),
-        (_, Some(p)) => Generator::Pattern(p),
-        _ => panic!("need length or pattern"),
+        (Some(_), Some(_)) => panic!("Can't provide both length and pattern generators."),
+        (Some(n), None) => Generator::LowerCase(n),
+        (None, Some(p)) => Generator::Pattern(p),
+        (None, None) => panic!("Need either length or pattern."),
     };
 
     let (candidate_tx, candidate_rx) = mpsc::channel();
 
     let (filedata, fileheaders) = load_file_data(Path::new(&opt.filename))?;
     assert_eq!(filedata.len(), fileheaders.len());
+
     if false {
+        // Simple test version, hard coding stuff.
         let filedata = filedata.clone();
         let filedata: &Vec<&[u8]> = &filedata.iter().map(AsRef::as_ref).collect();
         let gen = PWGenLowerCase::new(2);
@@ -530,11 +551,10 @@ fn main() -> Result<()> {
         use std::sync::{Arc, Mutex};
         let (tx, rx) = mpsc::channel();
         let rx = Arc::new(Mutex::new(rx));
-        //tx.send(format!("h.")).expect("send password");
         match generator {
             Generator::Pattern(ref p) => {
                 assert_eq!(p.chars().next(), Some('.'));
-                //println!("Tasks: {}", ALL_CHARS.len());
+                //println!("Thread task count: {}", ALL_CHARS.len());
                 for pre in ALL_CHARS {
                     let pat = format!("{}{}", *pre as char, &p[1..]);
                     //println!("Sent '{pat}'");
@@ -545,6 +565,8 @@ fn main() -> Result<()> {
                 let pattern = ".".repeat((n - 1).into());
                 // TODO: this is inconsistent. Threaded it actually
                 // does *ALL* characters. Should only do lower case.
+                //
+                // But pattern currently doesn't support that.
                 for pre in ALL_CHARS {
                     let pat = format!("{}{pattern}", *pre as char);
                     //println!("{pat}");
