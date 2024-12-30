@@ -18,7 +18,7 @@ static int max(int a, int b)
 	return (a > b) ? a : b;
 }
 
-int pwgen_inc_countcharsetlen(const char *charset, char *ebuf)
+int pwgen_inc_countcharsetlen(const char *restrict charset, char *restrict ebuf)
 {
 	int ret = 0;
 	enum { normal, choosechar, escnormal, escchoosechar } stat = normal;
@@ -67,7 +67,7 @@ int pwgen_inc_countcharsetlen(const char *charset, char *ebuf)
 	return ret;
 }
 
-void dealloc_charsets(pwgen_inc_state_t* state) {
+void dealloc_charsets(pwgen_inc_state_t* restrict state) {
   int c;
   for (c = 0; c < state->len; c++) {
     if (state->charset[c]) {
@@ -80,8 +80,8 @@ void dealloc_charsets(pwgen_inc_state_t* state) {
  * Todo: FIXME
  *   More regex handling (like '\' and stuff) (extract to other functions?)
  */
-static int pwgen_inc_parsecharset(pwgen_inc_state_t *state,
-				  const char *charset, int len, char *ebuf)
+static int pwgen_inc_parsecharset(pwgen_inc_state_t *restrict state,
+				  const char *restrict charset, int len, char *restrict ebuf)
 {
 	int c, pwpos;
 	enum { normal, choosechar, choosechar_range  } stat = normal;
@@ -209,10 +209,10 @@ static int pwgen_inc_parsecharset(pwgen_inc_state_t *state,
 	return 1;
 }
 
-pwgen_handle_t *pwgen_inc_init(const char *charset, int len, char *password,
-			       char *ebuf)
+pwgen_handle_t *pwgen_inc_init(const char *restrict charset, int len, char *restrict password,
+			       char *restrict ebuf)
 {
-	pwgen_inc_state_t *state;
+	pwgen_inc_state_t *restrict state;
 	int c;
 
 	if (!(state = malloc(sizeof(pwgen_inc_state_t)))) {
@@ -283,10 +283,10 @@ static void pwgen_inc_free(pwgen_handle_t **_state)
  *   The number of characters changed in password this call, 0 if no more
  *   passwords.
  */
-int pwgen_inc(pwgen_handle_t *_state, char *password)
+int pwgen_inc(pwgen_handle_t *restrict _state, char *restrict password)
 {
 	int ptr;
-	pwgen_inc_state_t *state = (pwgen_inc_state_t*)_state;
+	pwgen_inc_state_t *restrict state = (pwgen_inc_state_t*)_state;
 	int changecount = 1;
 
 	ptr = state->len - 1;

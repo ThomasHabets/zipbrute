@@ -24,7 +24,7 @@ struct zipfile_s {
 	zipfile_file_t *files;
 };
 
-#pragma pack(1)
+#pragma pack(push, 1)
 typedef struct ziplocal_s {
 	unsigned char version[2];
 	unsigned char gpb[2];
@@ -37,6 +37,6 @@ typedef struct ziplocal_s {
 	unsigned short flen;
 	unsigned short extralen;
 } ziplocal_t;
-#pragma unpack
+#pragma pack(pop)
 
 #endif

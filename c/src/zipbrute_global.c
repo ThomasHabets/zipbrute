@@ -59,7 +59,7 @@ int zipbrute_load(const char *_filename)
 		return 1;
 	}
 
-	for (handle = 0, c = 0; zff = zipfile_getfile(zipfile, &handle); c++) {
+	for (handle = 0, c = 0; (zff = zipfile_getfile(zipfile, &handle)); c++) {
 		fileheaders[c] = zff->it;
 		zipfile_cread(filedata[c], 12, 0, zff);
 	}

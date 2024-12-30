@@ -109,6 +109,6 @@ int zipbrute_crack_backend(pwgen_handle_t *state, char *password)
 				//return 1;
 			}
 		}
-	} while (change = state->pwgen(state, password));
+	} while ((change = state->pwgen(state, password)));
 	return 0;
 }

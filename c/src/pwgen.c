@@ -54,7 +54,7 @@ int main(int argc, char **argv)
 		state = pwgen_dict_init(charset, length, pwbuf, ebuf);
 		break;
 	default:
-		fprintf(stderr, "Internal error: unknown generator %d\n");
+	        fprintf(stderr, "Internal error: unknown generator %d\n", generator);
 		break;
 	}
 	if (!state) {
@@ -66,7 +66,7 @@ int main(int argc, char **argv)
 	do {
 		n++;
 //		printf("%3d> %s\n", change, pwbuf);
-	} while(change = state->pwgen(state, pwbuf));
+	} while((change = state->pwgen(state, pwbuf)));
 
 	state->free(&state);
 

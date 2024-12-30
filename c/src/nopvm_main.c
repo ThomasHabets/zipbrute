@@ -20,7 +20,7 @@ char *pwbuf;
 int use_unzip = 0;
 int zipbrute_load(const char *_filename);
 /*
- *
+ * return 1 if we're sure this is the right password.
  */
 int zipbrute_possible(pwgen_handle_t *state, const char *password)
 {
@@ -37,6 +37,7 @@ int zipbrute_possible(pwgen_handle_t *state, const char *password)
 	} else {//        1234567890
 		printf("\rPossible: %-70s\n", password);
 	}
+	return 0;
 }
 
 static void usage(const char *app, int ret)
