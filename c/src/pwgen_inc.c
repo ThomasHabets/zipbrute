@@ -66,6 +66,16 @@ int pwgen_inc_countcharsetlen(const char *charset, char *ebuf)
 	}
 	return ret;
 }
+
+void dealloc_charsets(pwgen_inc_state_t* state) {
+  int c;
+  for (c = 0; c < state->len; c++) {
+    if (state->charset[c]) {
+      free(state->charset[c]);
+    }
+  }
+}
+
 /*
  * Todo: FIXME
  *   More regex handling (like '\' and stuff) (extract to other functions?)
@@ -73,15 +83,6 @@ int pwgen_inc_countcharsetlen(const char *charset, char *ebuf)
 static int pwgen_inc_parsecharset(pwgen_inc_state_t *state,
 				  const char *charset, int len, char *ebuf)
 {
-	void dealloc_charsets(void) {
-		int c;
-		for (c = 0; c < state->len; c++) {
-			if (state->charset[c]) {
-				free(state->charset[c]);
-			}
-		}
-	}
-
 	int c, pwpos;
 	enum { normal, choosechar, choosechar_range  } stat = normal;
 	char rangefrom;
@@ -101,14 +102,14 @@ static int pwgen_inc_parsecharset(pwgen_inc_state_t *state,
 					 "Parse error reading charset: "
 					 "End of charset while not in normal "
 					 "mode");
-				dealloc_charsets();
+				dealloc_charsets(state);
 				return 0;
 			}
 			if (pwpos != len) {
 				snprintf(ebuf, PWGEN_MAXLEN_EBUF,
 					 "Parse error reading charset: "
 					 "Too few characters");
-				dealloc_charsets();
+				dealloc_charsets(state);
 				return 0;
 			}
 			break;
@@ -120,7 +121,7 @@ static int pwgen_inc_parsecharset(pwgen_inc_state_t *state,
 			snprintf(ebuf, PWGEN_MAXLEN_EBUF,
 				 "Parse error reading charset: "
 				 "Too many characters (%d >= %d)", pwpos, len);
-			dealloc_charsets();
+			dealloc_charsets(state);
 			return 0;
 		}
 		/*
@@ -131,7 +132,7 @@ static int pwgen_inc_parsecharset(pwgen_inc_state_t *state,
 			      malloc(sizeof(char*)*max(strlen(charset), 
 						       strlen(regex_dot))+1))){
 				// FIXME (dealloc above)
-				dealloc_charsets();
+				dealloc_charsets(state);
 				snprintf(ebuf, PWGEN_MAXLEN_EBUF,
 					 "Out of memory");
 				return 0;
@@ -163,7 +164,7 @@ static int pwgen_inc_parsecharset(pwgen_inc_state_t *state,
 				pwpos++;
 			} else if (charset[c] == '-') {
 				if (!state->charset[pwpos][0]) {
-					dealloc_charsets();
+					dealloc_charsets(state);
 					snprintf(ebuf, PWGEN_MAXLEN_EBUF,
 						 "Parse error reading charset:"
 						 " not a range");
