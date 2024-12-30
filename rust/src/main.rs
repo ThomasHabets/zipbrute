@@ -153,7 +153,7 @@ impl PWGen for PWGenLowerCase {
         (&self.state, change, false)
     }
     fn to_string(&self) -> String {
-        String::from_utf8(self.state.clone()).unwrap()
+        String::from_utf8(self.state.clone()).expect("pwgen create string from")
     }
     fn last_char(&self) -> Vec<u8> {
         let mut ret = vec![];
@@ -226,7 +226,7 @@ impl PWGen for PWGenPattern {
         (&self.nxt, change, false)
     }
     fn to_string(&self) -> String {
-        String::from_utf8(self.nxt.clone()).unwrap()
+        String::from_utf8(self.nxt.clone()).expect("PWGenPattern generated invalid UTF-8")
     }
     fn last_char(&self) -> Vec<u8> {
         self.chars[self.chars.len() - 1].clone()
@@ -408,7 +408,7 @@ fn crack_simd(
                 .filter(|(_idx, &val)| val)
                 .map(|(idx, _)| {
                     let ch = (b'a' + idx as u8) as char;
-                    let prefix = std::str::from_utf8(pw).unwrap();
+                    let prefix = std::str::from_utf8(pw).expect("invalid prefix");
                     let mut s = prefix.to_string();
                     s.push(ch);
                     candidate_tx
@@ -585,7 +585,7 @@ fn main() -> Result<()> {
                 let filedata: &Vec<&[u8]> = &filedata.iter().map(AsRef::as_ref).collect();
                 let mut sum = 0;
                 loop {
-                    let msg = rx2.lock().unwrap().recv();
+                    let msg = rx2.lock().expect("lock failure").recv();
                     match msg {
                         Ok(pw) => match engine {
                             Engine::Simd => {
