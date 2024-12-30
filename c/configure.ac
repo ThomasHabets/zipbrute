@@ -1,5 +1,5 @@
 AC_PREREQ([2.71])
-AC_INIT([arping],[0.01],[thomas@habets.se])
+AC_INIT([zipbrute],[0.01],[thomas@habets.se])
 AC_CANONICAL_TARGET
 AC_CONFIG_SRCDIR([src/zipbrute.c])
 AM_INIT_AUTOMAKE
