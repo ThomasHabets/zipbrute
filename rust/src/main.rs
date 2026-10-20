@@ -13,8 +13,10 @@ const K2: u32 = 0x34567890;
 const MAX_CHECKS: u64 = 50_000_000;
 static ALL_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
 
-type Batch = std::simd::u32x16;
-type Mask = std::simd::mask32x16;
+// Keep enough independent passwords in flight to hide CRC lookup latency.
+const LANES: usize = 64;
+type Batch = std::simd::Simd<u32, LANES>;
+type Mask = std::simd::Mask<i32, LANES>;
 
 // Non-SIMD CRC calculation.
 fn crc32(x: u32, c: u8) -> u32 {
@@ -119,25 +121,30 @@ trait PWGen {
 
 struct PWGenLowerCase {
     state: Vec<u8>,
+    started: bool,
 }
 
 impl PWGenLowerCase {
     fn new(n: u8) -> Self {
-        let mut state = vec![b'a'; n as usize];
-        state[n as usize - 1] -= 1;
-        Self { state }
+        Self {
+            state: vec![b'a'; n as usize],
+            started: false,
+        }
     }
     fn prefix(&self) -> Self {
-        Self {
-            state: self.state[0..self.state.len() - 1].to_vec(),
-        }
+        Self::new((self.state.len() - 1) as u8)
     }
 }
 
 impl PWGen for PWGenLowerCase {
     fn next(&mut self) -> (&[u8], bool, bool) {
-        // TODO: this actually skips the first password, so the
-        // password had better not be "aaaaaa".
+        if !self.started {
+            self.started = true;
+            return (&self.state, true, false);
+        }
+        if self.state.is_empty() {
+            return (&self.state, false, true);
+        }
         let mut pos = self.state.len() - 1;
         let mut change = false;
         self.state[pos] += 1;
@@ -168,6 +175,7 @@ impl PWGen for PWGenLowerCase {
 // not implemented yet.
 struct PWGenPattern {
     pattern: String,
+    started: bool,
     state: Vec<u8>,
     nxt: Vec<u8>,
     chars: Vec<Vec<u8>>,
@@ -192,6 +200,7 @@ impl PWGenPattern {
         }
         Self {
             pattern: pattern.to_string(),
+            started: false,
             state: vec![0; n],
             nxt,
             chars,
@@ -204,12 +213,16 @@ impl PWGenPattern {
 
 impl PWGen for PWGenPattern {
     fn next(&mut self) -> (&[u8], bool, bool) {
+        if !self.started {
+            self.started = true;
+            return (&self.nxt, true, false);
+        }
         let len = self.state.len();
+        if len == 0 {
+            return (&self.nxt, false, true);
+        }
         let mut pos = len - 1;
         let mut change = false;
-        if self.state.iter().all(|x| *x == 0) {
-            change = true;
-        }
         self.state[pos] += 1;
         while self.state[pos] >= self.chars[pos].len() as u8 {
             if pos == 0 {
@@ -316,9 +329,6 @@ impl SKeyState {
 }
 
 // SIMD password cracker.
-//
-// TODO: the last char is so cheap to check, that it's probably faster
-// to Simd over the *second* to last character instead.
 fn crack_simd(
     filedata: &[&[u8]],
     fileheaders: &[u8],
@@ -331,9 +341,9 @@ fn crack_simd(
     let (lasts, lastlen) = {
         let l = last_chars;
         let mut ret = vec![];
-        for i in (0..l.len()).step_by(16) {
+        for i in (0..l.len()).step_by(LANES) {
             let mut b = vec![];
-            for j in 0..16 {
+            for j in 0..LANES {
                 if i + j >= l.len() {
                     b.push(0); // Waste.
                 } else {
@@ -356,23 +366,21 @@ fn crack_simd(
         }
         // Use cache for second to last.
         if change {
-            let cache_pw = &pw[..pw.len() - 1];
+            let cache_pw = &pw[..pw.len().saturating_sub(1)];
             //println!("Cache entry: {cache_pw:?}");
             ckey = KeyState::new(cache_pw);
         }
         let mut ks = ckey;
 
-        // Add second to last character.
-        {
-            let second_to_last = pw[pw.len() - 1];
-            //println!("Adding second to last: {second_to_last}");
+        // Add second to last character (absent for one-character passwords).
+        if let Some(&second_to_last) = pw.last() {
             ks.updatekeys(second_to_last);
         }
 
         n += lastlen;
         // Simd the last character.
         //println!("Running last batch");
-        'nextlast: for last in &lasts {
+        for (batch_index, last) in lasts.iter().enumerate() {
             //println!("Running a batch of {}: {last:?}", last.len());
             let mut state = SKeyState {
                 key0: Batch::splat(ks.key[0]),
@@ -382,42 +390,47 @@ fn crack_simd(
             };
             state.update(*last);
 
-            let mut ok = Mask::splat(true);
-            for nfile in 0..filedata.len() {
-                let mut tkey = state;
-                for t in &filedata[nfile][0..11] {
-                    let t = Batch::splat(*t as u32);
-                    tkey.update(t ^ tkey.key3);
-                }
-                let correct = Batch::splat(fileheaders[nfile].into());
-                let last = Batch::splat(filedata[nfile][11].into());
-                let got = last ^ tkey.key3;
-                ok &= got.simd_eq(correct);
-                if !ok.any() {
-                    continue 'nextlast;
-                }
-                //println!("{ok:?}");
+            let offset = batch_index * LANES;
+            let valid = Mask::from_array(std::array::from_fn(|i| offset + i < last_chars.len()));
+            let mut tkey = state;
+            for &byte in &filedata[0][..11] {
+                tkey.update(Batch::splat(byte.into()) ^ tkey.key3);
+            }
+            let expected = Batch::splat((fileheaders[0] ^ filedata[0][11]).into());
+            let ok = valid & tkey.key3.simd_eq(expected);
+            if !ok.any() {
+                continue;
             }
 
-            // It's OK that this is slow, since at least one password
-            // matched, which should be rare.
-            let candidates: Vec<_> = ok
-                .to_array()
-                .iter()
-                .enumerate()
-                .filter(|(_idx, &val)| val)
-                .map(|(idx, _)| {
-                    let ch = (b'a' + idx as u8) as char;
-                    let prefix = std::str::from_utf8(pw).expect("invalid prefix");
-                    let mut s = prefix.to_string();
-                    s.push(ch);
+            let mut survivors = ok.to_bitmask();
+            while survivors != 0 {
+                let idx = survivors.trailing_zeros() as usize;
+                survivors &= survivors - 1;
+                // Only about one lane in 256 passes the first header.
+                // Check these survivors individually on subsequent headers.
+                let ch = last_chars[offset + idx];
+                let mut key = ks;
+                key.updatekeys(ch);
+                let matches = filedata
+                    .iter()
+                    .zip(fileheaders)
+                    .skip(1)
+                    .all(|(data, &head)| {
+                        let mut key = key;
+                        for &byte in &data[..11] {
+                            key.updatekeys(byte ^ key.key3);
+                        }
+                        data[11] ^ key.key3 == head
+                    });
+                if matches {
+                    let mut candidate =
+                        std::str::from_utf8(pw).expect("invalid prefix").to_string();
+                    candidate.push(ch as char);
                     candidate_tx
-                        .send(s.clone())
+                        .send(candidate)
                         .expect("candidate failed to send");
-                    s
-                })
-                .collect();
-            println!("candidates {candidates:?}");
+                }
+            }
         }
     }
 }
@@ -453,6 +466,7 @@ fn load_file_data(path: &Path) -> Result<(Vec<[u8; 12]>, Vec<u8>)> {
         data.push(t);
         head.push(u8s[0]);
     }
+    anyhow::ensure!(!data.is_empty(), "zipdata contains no file headers");
     Ok((data, head))
 }
 
@@ -461,7 +475,7 @@ struct Opt {
     #[clap(short, long)]
     pattern: Option<String>,
 
-    #[clap(short, long)]
+    #[clap(short, long, value_parser = clap::value_parser!(u8).range(1..))]
     length: Option<u8>,
 
     #[clap(short, long, default_value = "1")]
@@ -485,7 +499,13 @@ fn main() -> Result<()> {
     let generator = match (opt.length, opt.pattern) {
         (Some(_), Some(_)) => panic!("Can't provide both length and pattern generators."),
         (Some(n), None) => Generator::LowerCase(n),
-        (None, Some(p)) => Generator::Pattern(p),
+        (None, Some(p)) => {
+            anyhow::ensure!(
+                !p.is_empty() && p.is_ascii(),
+                "pattern must be nonempty ASCII"
+            );
+            Generator::Pattern(p)
+        }
         (None, None) => panic!("Need either length or pattern."),
     };
 
@@ -654,6 +674,104 @@ mod tests {
             cs.push(pw);
         }
         Ok(cs)
+    }
+
+    fn encrypted_headers(password: &[u8]) -> (Vec<[u8; 12]>, Vec<u8>) {
+        let mut data = Vec::new();
+        let heads: Vec<u8> = vec![0x12, 0x45, 0xab];
+        for &head in &heads {
+            let mut key = KeyState::new(password);
+            let mut header = [0; 12];
+            for (i, byte) in header.iter_mut().enumerate() {
+                let plain = if i == 11 {
+                    head
+                } else {
+                    head.wrapping_add(i as u8)
+                };
+                *byte = plain ^ key.key3;
+                key.updatekeys(plain);
+            }
+            data.push(header);
+        }
+        (data, heads)
+    }
+
+    #[test]
+    fn simd_matches_plain_for_patterns() {
+        for (password, pattern) in [
+            ("aa", "a."),
+            ("az", "a."),
+            ("aZ", "a."),
+            ("a9", "a."),
+            ("a ", "a."),
+            ("aZ", "aZ"),
+            ("a", "."),
+            ("Z", "Z"),
+            ("aa", ".."),
+        ] {
+            let (data, heads) = encrypted_headers(password.as_bytes());
+            let refs: Vec<&[u8]> = data.iter().map(AsRef::as_ref).collect();
+            let (tx, rx) = mpsc::channel();
+            let generator = PWGenPattern::new(pattern);
+            crack_simd(
+                &refs,
+                &heads,
+                generator.prefix(),
+                &generator.last_char(),
+                tx,
+            );
+            let simd: Vec<_> = rx.into_iter().collect();
+            let (tx, rx) = mpsc::channel();
+            crack(&refs, &heads, PWGenPattern::new(pattern), tx);
+            let plain: Vec<_> = rx.into_iter().collect();
+            assert_eq!(simd, plain, "pattern {pattern}");
+            assert_eq!(simd, [password], "pattern {pattern}");
+        }
+    }
+
+    #[test]
+    fn simd_ignores_padding_lanes() {
+        let (data, heads) = encrypted_headers(b"a\0");
+        let refs: Vec<&[u8]> = data.iter().map(AsRef::as_ref).collect();
+        let (tx, rx) = mpsc::channel();
+        let generator = PWGenPattern::new("aZ");
+        let count = crack_simd(
+            &refs,
+            &heads,
+            generator.prefix(),
+            &generator.last_char(),
+            tx,
+        );
+        assert_eq!(count, 1);
+        assert!(rx.into_iter().next().is_none());
+    }
+
+    #[test]
+    fn simd_reports_characters_from_later_batches() {
+        let (data, heads) = encrypted_headers(b"a?");
+        let refs: Vec<&[u8]> = data.iter().map(AsRef::as_ref).collect();
+        let (tx, rx) = mpsc::channel();
+        let mut last_chars = ALL_CHARS.to_vec();
+        last_chars.extend_from_slice(b"!?");
+        let count = crack_simd(&refs, &heads, PWGenPattern::new("a"), &last_chars, tx);
+        assert_eq!(count, 65);
+        assert_eq!(rx.into_iter().collect::<Vec<_>>(), ["a?"]);
+    }
+
+    #[test]
+    fn simd_checks_initial_lowercase_prefix() {
+        let (data, heads) = encrypted_headers(b"aaa");
+        let refs: Vec<&[u8]> = data.iter().map(AsRef::as_ref).collect();
+        let (tx, rx) = mpsc::channel();
+        let generator = PWGenLowerCase::new(3);
+        crack_simd(
+            &refs,
+            &heads,
+            generator.prefix(),
+            &generator.last_char(),
+            tx,
+        );
+        assert_eq!(rx.into_iter().collect::<Vec<_>>(), ["aaa"]);
     }
 
     #[test]
