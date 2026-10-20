@@ -4,7 +4,6 @@ use clap::Parser;
 use std::io::BufRead;
 use std::path::Path;
 use std::simd::cmp::SimdPartialEq;
-use std::simd::num::SimdUint;
 use std::sync::mpsc;
 
 const K0: u32 = 0x12345678;
@@ -26,10 +25,36 @@ fn crc32(x: u32, c: u8) -> u32 {
 
 // SIMD CRC calculation.
 fn crc32_simd(x: Batch, c: Batch) -> Batch {
-    let ff = Batch::splat(0xff);
-    let idx = (x ^ c) & ff;
-    let idx = idx.cast::<usize>();
-    (x >> 8) ^ Batch::gather_or_default(&CRCTAB, idx)
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        use std::arch::x86_64::*;
+        // CRC is linear: split an eight-bit index into groups of 3, 3,
+        // and 2 bits. Each small lookup fits in an AVX2 register.
+        // SAFETY: AVX2 is enabled at compile time. Batch and the register
+        // arrays have identical sizes and accept all bit patterns. Permutes
+        // use only three index bits; repeating the high table discards bit 8.
+        unsafe {
+            let low: __m256i = std::mem::transmute(std::array::from_fn::<_, 8, _>(|i| CRCTAB[i]));
+            let mid: __m256i =
+                std::mem::transmute(std::array::from_fn::<_, 8, _>(|i| CRCTAB[i << 3]));
+            let high: __m256i =
+                std::mem::transmute(std::array::from_fn::<_, 8, _>(|i| CRCTAB[(i & 3) << 6]));
+            let indices: [__m256i; LANES / 8] = std::mem::transmute(x ^ c);
+            let result = indices.map(|idx| {
+                let a = _mm256_permutevar8x32_epi32(low, idx);
+                let b = _mm256_permutevar8x32_epi32(mid, _mm256_srli_epi32::<3>(idx));
+                let c = _mm256_permutevar8x32_epi32(high, _mm256_srli_epi32::<6>(idx));
+                _mm256_xor_si256(_mm256_xor_si256(a, b), c)
+            });
+            (x >> 8) ^ std::mem::transmute::<[__m256i; LANES / 8], Batch>(result)
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        use std::simd::num::SimdUint;
+        let idx = ((x ^ c) & Batch::splat(0xff)).cast::<usize>();
+        (x >> 8) ^ Batch::gather_or_default(&CRCTAB, idx)
+    }
 }
 
 const CRCTAB: [u32; 256] = [
@@ -315,7 +340,6 @@ impl SKeyState {
         let magic = Batch::splat(134775813);
         let one = Batch::splat(1);
         let ff = Batch::splat(0xff);
-        let ffff = Batch::splat(0xffff);
         let three = Batch::splat(3);
 
         // table lookup
@@ -323,8 +347,17 @@ impl SKeyState {
         let t = self.key1 + (self.key0 & ff);
         self.key1 = t * magic + one;
         self.key2 = crc32_simd(self.key2, (self.key1 >> 24) & ff);
-        let temp = (self.key2 & ffff) | three;
-        self.key3 = ((temp * (temp ^ one)) >> 8) & ff;
+        let temp = self.key2 | three;
+        // The keystream needs only bits 8..15 of the product. Multiply
+        // 16-bit words instead of paying for full 32-bit SIMD products.
+        // SAFETY: each array has exactly the same size as Batch and all bit
+        // patterns are valid. Each u32 is split into independent u16 words;
+        // the final mask discards the product of the upper words.
+        let left: [std::simd::Simd<u16, LANES>; 2] = unsafe { std::mem::transmute(temp) };
+        let right: [std::simd::Simd<u16, LANES>; 2] = unsafe { std::mem::transmute(temp ^ one) };
+        let product: Batch =
+            unsafe { std::mem::transmute([left[0] * right[0], left[1] * right[1]]) };
+        self.key3 = (product >> 8) & ff;
     }
 }
 
@@ -674,6 +707,51 @@ mod tests {
             cs.push(pw);
         }
         Ok(cs)
+    }
+
+    #[test]
+    fn simd_crc_matches_scalar() {
+        for upper in [0, 0x12345600, 0xffffff00, 0x80000000] {
+            for byte in 0..=255_u8 {
+                for start in (0..256).step_by(LANES) {
+                    let input = std::array::from_fn(|i| upper | (start + i) as u32);
+                    let actual = crc32_simd(Batch::from_array(input), Batch::splat(byte.into()));
+                    assert_eq!(actual.to_array(), input.map(|x| crc32(x, byte)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simd_key_updates_match_scalar() {
+        let mut random = 0x9e3779b9_u32;
+        let mut next = || {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            random
+        };
+        let mut scalar: [KeyState; LANES] = std::array::from_fn(|_| KeyState {
+            key: [next(), next(), next()],
+            key3: 0,
+        });
+        let mut simd = SKeyState {
+            key0: Batch::from_array(scalar.map(|key| key.key[0])),
+            key1: Batch::from_array(scalar.map(|key| key.key[1])),
+            key2: Batch::from_array(scalar.map(|key| key.key[2])),
+            key3: Batch::splat(0),
+        };
+        for _ in 0..64 {
+            let bytes: [u32; LANES] = std::array::from_fn(|_| next() & 255);
+            simd.update(Batch::from_array(bytes));
+            for (key, byte) in scalar.iter_mut().zip(bytes) {
+                key.updatekeys(byte as u8);
+            }
+            assert_eq!(simd.key0.to_array(), scalar.map(|key| key.key[0]));
+            assert_eq!(simd.key1.to_array(), scalar.map(|key| key.key[1]));
+            assert_eq!(simd.key2.to_array(), scalar.map(|key| key.key[2]));
+            assert_eq!(simd.key3.to_array(), scalar.map(|key| key.key3 as u32));
+        }
     }
 
     fn encrypted_headers(password: &[u8]) -> (Vec<[u8; 12]>, Vec<u8>) {
