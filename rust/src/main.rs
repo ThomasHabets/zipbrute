@@ -12,8 +12,18 @@ const K2: u32 = 0x34567890;
 const MAX_CHECKS: u64 = 50_000_000;
 static ALL_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
 
-// Keep enough independent passwords in flight to hide CRC lookup latency.
-const LANES: usize = 64;
+// Measured on the RV2: 32 lanes work better with 256-bit RVV register groups.
+// Preserve the existing batch width for other targets.
+const LANES: usize = if cfg!(all(
+    target_arch = "riscv64",
+    target_feature = "v",
+    target_feature = "zvl256b",
+    not(target_feature = "zvl512b")
+)) {
+    32
+} else {
+    64
+};
 type Batch = std::simd::Simd<u32, LANES>;
 
 // Non-SIMD CRC calculation.
@@ -394,7 +404,7 @@ impl LastBatch {
         Self {
             crc,
             key1_products,
-            valid: u64::MAX >> (LANES - chars.len()),
+            valid: u64::MAX >> (u64::BITS as usize - chars.len()),
         }
     }
 

@@ -26,9 +26,11 @@ The search currently stops after approximately 50 million passwords per cracking
 task (`MAX_CHECKS`); this command does not exhaust the eight-character search space.
 The release profile already enables `target-cpu=native`.
 
-The optimized search uses 64-lane SIMD batches to hide CRC lookup latency. It
-caches each final character's CRC and multiplication contributions, using 64 KiB
-per batch to reduce the work of initializing keys for each prefix. On AVX2 targets,
+The optimized search uses 32-lane SIMD batches for RV64 RVV builds targeting a
+256-bit minimum vector length, and 64 lanes for other targets. The 32-lane size
+was measured on an Orange Pi RV2 with `-C target-cpu=native -C target-feature=+v`.
+It caches each final character's CRC and multiplication contributions, using
+1 KiB per lane to reduce the work of initializing keys for each prefix. On AVX2 targets,
 it splits the CRC lookup into three small tables held in registers,
 replacing memory gathers with register permutations. Other targets keep the
 portable gather implementation. Keystream generation uses 16-bit SIMD products
