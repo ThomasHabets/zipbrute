@@ -54,20 +54,7 @@ fn crc32_simd(x: Batch, c: Batch) -> Batch {
             (x >> 8) ^ std::mem::transmute::<[__m256i; LANES / 8], Batch>(result)
         }
     }
-    #[cfg(all(
-        any(target_arch = "riscv32", target_arch = "riscv64"),
-        target_feature = "v"
-    ))]
-    {
-        rvv::crc32(x, c)
-    }
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(
-            any(target_arch = "riscv32", target_arch = "riscv64"),
-            target_feature = "v"
-        )
-    )))]
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     {
         use std::simd::num::SimdUint;
         let idx = ((x ^ c) & Batch::splat(0xff)).cast::<usize>();
@@ -114,6 +101,7 @@ const CRCTAB: [u32; 256] = [
 enum Engine {
     Simd,
     Plain,
+    Rvv,
 }
 
 #[derive(Clone)]
@@ -428,13 +416,85 @@ impl LastBatch {
     }
 }
 
+#[inline]
+fn first_header_simd(mut state: SKeyState, data: &[u8]) -> Batch {
+    for &byte in &data[..11] {
+        state.update(Batch::splat(byte.into()) ^ state.key3);
+    }
+    state.key3
+}
+
+fn first_header_rvv(state: SKeyState, data: &[u8]) -> Batch {
+    #[cfg(all(
+        any(target_arch = "riscv32", target_arch = "riscv64"),
+        target_feature = "v"
+    ))]
+    {
+        rvv::header_keystream(&state, data[..11].try_into().unwrap())
+    }
+    #[cfg(not(all(
+        any(target_arch = "riscv32", target_arch = "riscv64"),
+        target_feature = "v"
+    )))]
+    {
+        first_header_simd(state, data)
+    }
+}
+
 // SIMD password cracker.
 fn crack_simd(
+    filedata: &[&[u8]],
+    fileheaders: &[u8],
+    password: impl PWGen,
+    last_chars: &[u8],
+    candidate_tx: std::sync::mpsc::Sender<String>,
+) -> u64 {
+    crack_simd_with_engine(
+        filedata,
+        fileheaders,
+        password,
+        last_chars,
+        candidate_tx,
+        Engine::Simd,
+    )
+}
+
+fn crack_simd_with_engine(
+    filedata: &[&[u8]],
+    fileheaders: &[u8],
+    password: impl PWGen,
+    last_chars: &[u8],
+    candidate_tx: std::sync::mpsc::Sender<String>,
+    engine: Engine,
+) -> u64 {
+    // Dispatch once per search, so the default SIMD loop has no RVV branch.
+    match engine {
+        Engine::Rvv => crack_simd_impl(
+            filedata,
+            fileheaders,
+            password,
+            last_chars,
+            candidate_tx,
+            first_header_rvv,
+        ),
+        _ => crack_simd_impl(
+            filedata,
+            fileheaders,
+            password,
+            last_chars,
+            candidate_tx,
+            first_header_simd,
+        ),
+    }
+}
+
+fn crack_simd_impl(
     filedata: &[&[u8]],
     fileheaders: &[u8],
     mut password: impl PWGen,
     last_chars: &[u8],
     candidate_tx: std::sync::mpsc::Sender<String>,
+    first_header: impl Fn(SKeyState, &[u8]) -> Batch,
 ) -> u64 {
     let mut n = 0_u64;
     let mut ckey = KeyState::default();
@@ -469,12 +529,9 @@ fn crack_simd(
         for (batch_index, last) in lasts.iter().enumerate() {
             let state = last.state(ks);
             let offset = batch_index * LANES;
-            let mut tkey = state;
-            for &byte in &filedata[0][..11] {
-                tkey.update(Batch::splat(byte.into()) ^ tkey.key3);
-            }
+            let key3 = first_header(state, filedata[0]);
             let expected = Batch::splat((fileheaders[0] ^ filedata[0][11]).into());
-            let ok = tkey.key3.simd_eq(expected);
+            let ok = key3.simd_eq(expected);
             if !ok.any() {
                 continue;
             }
@@ -561,6 +618,7 @@ struct Opt {
     #[clap(short)]
     filename: String,
 
+    /// Search engine: simd, plain, or experimental rvv (requires a +v build).
     #[clap(long, default_value = "simd")]
     engine: String,
 }
@@ -571,7 +629,17 @@ fn main() -> Result<()> {
     let engine = match opt.engine.to_lowercase().as_str() {
         "plain" => Engine::Plain,
         "simd" => Engine::Simd,
-        _ => panic!("Only engines are SIMD and plain"),
+        "rvv" => {
+            anyhow::ensure!(
+                cfg!(all(
+                    any(target_arch = "riscv32", target_arch = "riscv64"),
+                    target_feature = "v"
+                )),
+                "the rvv engine requires a RISC-V build with target-feature=+v"
+            );
+            Engine::Rvv
+        }
+        _ => anyhow::bail!("engines are simd, plain, and rvv"),
     };
     let generator = match (opt.length, opt.pattern) {
         (Some(_), Some(_)) => panic!("Can't provide both length and pattern generators."),
@@ -615,24 +683,26 @@ fn main() -> Result<()> {
     if opt.threads == 1 {
         let filedata: &Vec<&[u8]> = &filedata.iter().map(AsRef::as_ref).collect();
         entries = match (engine, generator) {
-            (Engine::Simd, Generator::LowerCase(n)) => {
+            (Engine::Simd | Engine::Rvv, Generator::LowerCase(n)) => {
                 let gen = PWGenLowerCase::new(n);
-                crack_simd(
+                crack_simd_with_engine(
                     filedata,
                     &fileheaders,
                     gen.prefix(),
                     &gen.last_char(),
                     candidate_tx.clone(),
+                    engine,
                 )
             }
-            (Engine::Simd, Generator::Pattern(s)) => {
+            (Engine::Simd | Engine::Rvv, Generator::Pattern(s)) => {
                 let gen = PWGenPattern::new(&s);
-                crack_simd(
+                crack_simd_with_engine(
                     filedata,
                     &fileheaders,
                     gen.prefix(),
                     &gen.last_char(),
                     candidate_tx.clone(),
+                    engine,
                 )
             }
             (Engine::Plain, Generator::LowerCase(n)) => {
@@ -685,16 +755,17 @@ fn main() -> Result<()> {
                     let msg = rx2.lock().expect("lock failure").recv();
                     match msg {
                         Ok(pw) => match engine {
-                            Engine::Simd => {
+                            Engine::Simd | Engine::Rvv => {
                                 let gen = PWGenPattern::new(&pw);
                                 let gen2 = gen.prefix();
                                 //println!("generator {:?} with last char {:?}", gen2.pattern, gen.last_char());
-                                sum += crack_simd(
+                                sum += crack_simd_with_engine(
                                     filedata,
                                     &fileheaders,
                                     gen2,
                                     &gen.last_char(),
                                     candidate_tx.clone(),
+                                    engine,
                                 )
                             }
                             Engine::Plain => {
@@ -826,6 +897,72 @@ mod tests {
             assert_eq!(simd.key1.to_array(), scalar.map(|key| key.key[1]));
             assert_eq!(simd.key2.to_array(), scalar.map(|key| key.key[2]));
             assert_eq!(simd.key3.to_array(), scalar.map(|key| key.key3 as u32));
+        }
+    }
+
+    #[cfg(all(
+        any(target_arch = "riscv32", target_arch = "riscv64"),
+        target_feature = "v"
+    ))]
+    #[test]
+    fn rvv_header_matches_scalar() {
+        let mut random = 0x9e3779b9_u32;
+        let mut next = || {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            random as u8
+        };
+        for _ in 0..32 {
+            let mut scalar: [KeyState; LANES] =
+                std::array::from_fn(|_| KeyState::new(&std::array::from_fn::<_, 8, _>(|_| next())));
+            let state = SKeyState {
+                key0: Batch::from_array(scalar.map(|key| key.key[0])),
+                key1: Batch::from_array(scalar.map(|key| key.key[1])),
+                key2: Batch::from_array(scalar.map(|key| key.key[2])),
+                key3: Batch::from_array(scalar.map(|key| key.key3 as u32)),
+            };
+            let data: [u8; 11] = std::array::from_fn(|_| next());
+            for key in &mut scalar {
+                for &byte in &data {
+                    key.updatekeys(byte ^ key.key3);
+                }
+            }
+            let expected = scalar.map(|key| key.key3 as u32);
+            assert_eq!(first_header_simd(state, &data).to_array(), expected);
+            assert_eq!(first_header_rvv(state, &data).to_array(), expected);
+        }
+    }
+
+    #[cfg(all(
+        any(target_arch = "riscv32", target_arch = "riscv64"),
+        target_feature = "v"
+    ))]
+    #[test]
+    fn rvv_engine_matches_simd() {
+        for (password, pattern) in [("hej", "h.."), ("aZ", "a."), ("a\0", "az")] {
+            let (data, heads) = encrypted_headers(password.as_bytes());
+            let refs: Vec<&[u8]> = data.iter().map(AsRef::as_ref).collect();
+            let mut runs = Vec::new();
+            for engine in [Engine::Simd, Engine::Rvv] {
+                let (tx, rx) = mpsc::channel();
+                let generator = PWGenPattern::new(pattern);
+                let count = crack_simd_with_engine(
+                    &refs,
+                    &heads,
+                    generator.prefix(),
+                    &generator.last_char(),
+                    tx,
+                    engine,
+                );
+                runs.push((count, rx.into_iter().collect::<Vec<_>>()));
+            }
+            assert_eq!(runs[0], runs[1], "pattern {pattern}");
+            if password.contains('\0') {
+                assert!(runs[1].1.is_empty());
+            } else {
+                assert_eq!(runs[1].1, [password]);
+            }
         }
     }
 
