@@ -6,6 +6,12 @@ use std::path::Path;
 use std::simd::cmp::SimdPartialEq;
 use std::sync::mpsc;
 
+#[cfg(all(
+    any(target_arch = "riscv32", target_arch = "riscv64"),
+    target_feature = "v"
+))]
+mod rvv;
+
 const K0: u32 = 0x12345678;
 const K1: u32 = 0x23456789;
 const K2: u32 = 0x34567890;
@@ -48,7 +54,20 @@ fn crc32_simd(x: Batch, c: Batch) -> Batch {
             (x >> 8) ^ std::mem::transmute::<[__m256i; LANES / 8], Batch>(result)
         }
     }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    #[cfg(all(
+        any(target_arch = "riscv32", target_arch = "riscv64"),
+        target_feature = "v"
+    ))]
+    {
+        rvv::crc32(x, c)
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(
+            any(target_arch = "riscv32", target_arch = "riscv64"),
+            target_feature = "v"
+        )
+    )))]
     {
         use std::simd::num::SimdUint;
         let idx = ((x ^ c) & Batch::splat(0xff)).cast::<usize>();
