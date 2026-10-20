@@ -26,8 +26,10 @@ The search currently stops after approximately 50 million passwords per cracking
 task (`MAX_CHECKS`); this command does not exhaust the eight-character search space.
 The release profile already enables `target-cpu=native`.
 
-The optimized search uses 64-lane SIMD batches to hide CRC lookup latency. On
-AVX2 targets, it splits the CRC lookup into three small tables held in registers,
+The optimized search uses 64-lane SIMD batches to hide CRC lookup latency. It
+caches each final character's CRC and multiplication contributions, using 64 KiB
+per batch to reduce the work of initializing keys for each prefix. On AVX2 targets,
+it splits the CRC lookup into three small tables held in registers,
 replacing memory gathers with register permutations. Other targets keep the
 portable gather implementation. Keystream generation uses 16-bit SIMD products
 because only bits 8..15 are needed. After checking the first ZIP header in SIMD,

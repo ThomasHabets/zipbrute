@@ -15,7 +15,6 @@ static ALL_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 // Keep enough independent passwords in flight to hide CRC lookup latency.
 const LANES: usize = 64;
 type Batch = std::simd::Simd<u32, LANES>;
-type Mask = std::simd::Mask<i32, LANES>;
 
 // Non-SIMD CRC calculation.
 fn crc32(x: u32, c: u8) -> u32 {
@@ -340,13 +339,18 @@ impl SKeyState {
         let magic = Batch::splat(134775813);
         let one = Batch::splat(1);
         let ff = Batch::splat(0xff);
-        let three = Batch::splat(3);
-
         // table lookup
         self.key0 = crc32_simd(self.key0, byte);
         let t = self.key1 + (self.key0 & ff);
         self.key1 = t * magic + one;
         self.key2 = crc32_simd(self.key2, (self.key1 >> 24) & ff);
+        self.update_keystream();
+    }
+
+    fn update_keystream(&mut self) {
+        let one = Batch::splat(1);
+        let ff = Batch::splat(255);
+        let three = Batch::splat(3);
         let temp = self.key2 | three;
         // The keystream needs only bits 8..15 of the product. Multiply
         // 16-bit words instead of paying for full 32-bit SIMD products.
@@ -361,6 +365,50 @@ impl SKeyState {
     }
 }
 
+// The final character's CRC contribution is independent of the prefix.
+// Cache its contribution to key1 as well, for every possible prefix CRC byte.
+struct LastBatch {
+    crc: Batch,
+    key1_products: Vec<Batch>,
+    valid: u64,
+}
+
+impl LastBatch {
+    fn new(chars: &[u8]) -> Self {
+        assert!(!chars.is_empty() && chars.len() <= LANES);
+        let crc = Batch::from_array(std::array::from_fn(|i| {
+            CRCTAB[chars.get(i).copied().unwrap_or(0) as usize]
+        }));
+        let key1_products = (0..256_u32)
+            .map(|prefix| {
+                ((crc ^ Batch::splat(prefix)) & Batch::splat(255)) * Batch::splat(134775813)
+            })
+            .collect();
+        Self {
+            crc,
+            key1_products,
+            valid: u64::MAX >> (LANES - chars.len()),
+        }
+    }
+
+    fn state(&self, prefix: KeyState) -> SKeyState {
+        let prefix_crc = crc32(prefix.key[0], 0);
+        let key0 = Batch::splat(prefix_crc) ^ self.crc;
+        // Distribute multiplication over addition, leaving just a scalar
+        // multiply and a cached vector load for each prefix.
+        let key1 = Batch::splat(prefix.key[1].wrapping_mul(134775813).wrapping_add(1))
+            + self.key1_products[prefix_crc as u8 as usize];
+        let mut state = SKeyState {
+            key0,
+            key1,
+            key2: crc32_simd(Batch::splat(prefix.key[2]), key1 >> 24),
+            key3: Batch::splat(0),
+        };
+        state.update_keystream();
+        state
+    }
+}
+
 // SIMD password cracker.
 fn crack_simd(
     filedata: &[&[u8]],
@@ -371,22 +419,8 @@ fn crack_simd(
 ) -> u64 {
     let mut n = 0_u64;
     let mut ckey = KeyState::default();
-    let (lasts, lastlen) = {
-        let l = last_chars;
-        let mut ret = vec![];
-        for i in (0..l.len()).step_by(LANES) {
-            let mut b = vec![];
-            for j in 0..LANES {
-                if i + j >= l.len() {
-                    b.push(0); // Waste.
-                } else {
-                    b.push(l[i + j] as u32);
-                }
-            }
-            ret.push(Batch::from_slice(&b));
-        }
-        (ret, l.len() as u64)
-    };
+    let lasts: Vec<_> = last_chars.chunks(LANES).map(LastBatch::new).collect();
+    let lastlen = last_chars.len() as u64;
 
     loop {
         let (pw, change, done) = password.next();
@@ -414,28 +448,19 @@ fn crack_simd(
         // Simd the last character.
         //println!("Running last batch");
         for (batch_index, last) in lasts.iter().enumerate() {
-            //println!("Running a batch of {}: {last:?}", last.len());
-            let mut state = SKeyState {
-                key0: Batch::splat(ks.key[0]),
-                key1: Batch::splat(ks.key[1]),
-                key2: Batch::splat(ks.key[2]),
-                key3: Batch::splat(0),
-            };
-            state.update(*last);
-
+            let state = last.state(ks);
             let offset = batch_index * LANES;
-            let valid = Mask::from_array(std::array::from_fn(|i| offset + i < last_chars.len()));
             let mut tkey = state;
             for &byte in &filedata[0][..11] {
                 tkey.update(Batch::splat(byte.into()) ^ tkey.key3);
             }
             let expected = Batch::splat((fileheaders[0] ^ filedata[0][11]).into());
-            let ok = valid & tkey.key3.simd_eq(expected);
+            let ok = tkey.key3.simd_eq(expected);
             if !ok.any() {
                 continue;
             }
 
-            let mut survivors = ok.to_bitmask();
+            let mut survivors = ok.to_bitmask() & last.valid;
             while survivors != 0 {
                 let idx = survivors.trailing_zeros() as usize;
                 survivors &= survivors - 1;
@@ -718,6 +743,37 @@ mod tests {
                     let actual = crc32_simd(Batch::from_array(input), Batch::splat(byte.into()));
                     assert_eq!(actual.to_array(), input.map(|x| crc32(x, byte)));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_last_character_states_match_scalar() {
+        let chars: Vec<u8> = (0..=255).collect();
+        for chunk in chars.chunks(LANES) {
+            let cached = LastBatch::new(chunk);
+            for prefix in [
+                KeyState::new(b""),
+                KeyState::new(b"test prefix"),
+                KeyState {
+                    key: [u32::MAX; 3],
+                    key3: 0,
+                },
+                KeyState {
+                    key: [0xdeadbeef, 0xfffffff0, 0x87654321],
+                    key3: 0,
+                },
+            ] {
+                let expected: [KeyState; LANES] = std::array::from_fn(|i| {
+                    let mut key = prefix;
+                    key.updatekeys(chunk[i]);
+                    key
+                });
+                let actual = cached.state(prefix);
+                assert_eq!(actual.key0.to_array(), expected.map(|key| key.key[0]));
+                assert_eq!(actual.key1.to_array(), expected.map(|key| key.key[1]));
+                assert_eq!(actual.key2.to_array(), expected.map(|key| key.key[2]));
+                assert_eq!(actual.key3.to_array(), expected.map(|key| key.key3 as u32));
             }
         }
     }
