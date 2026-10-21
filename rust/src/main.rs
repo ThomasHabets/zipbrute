@@ -14,16 +14,13 @@ static ALL_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 // Measured on the RV2: 32 lanes work better with 256-bit RVV register groups.
 // Preserve the existing batch width for other targets.
-const LANES: usize = if cfg!(all(
+const RVV_256: bool = cfg!(all(
     target_arch = "riscv64",
     target_feature = "v",
     target_feature = "zvl256b",
     not(target_feature = "zvl512b")
-)) {
-    32
-} else {
-    64
-};
+));
+const LANES: usize = if RVV_256 { 32 } else { 64 };
 type Batch = std::simd::Simd<u32, LANES>;
 
 // Non-SIMD CRC calculation.
@@ -415,10 +412,18 @@ impl LastBatch {
         // multiply and a cached vector load for each prefix.
         let key1 = Batch::splat(prefix.key[1].wrapping_mul(134775813).wrapping_add(1))
             + self.key1_products[prefix_crc as u8 as usize];
+        let key2 = if RVV_256 {
+            // CRC is linear. Keep the prefix contribution scalar so that
+            // RVV only gathers with byte-sized indices from key1 >> 24.
+            // This avoids widening the initial gather offsets to 64 bits.
+            Batch::splat(crc32(prefix.key[2], 0)) ^ crc32_simd(Batch::splat(0), key1 >> 24)
+        } else {
+            crc32_simd(Batch::splat(prefix.key[2]), key1 >> 24)
+        };
         let mut state = SKeyState {
             key0,
             key1,
-            key2: crc32_simd(Batch::splat(prefix.key[2]), key1 >> 24),
+            key2,
             key3: Batch::splat(0),
         };
         state.update_keystream();
@@ -438,6 +443,13 @@ fn crack_simd(
     let mut ckey = KeyState::default();
     let lasts: Vec<_> = last_chars.chunks(LANES).map(LastBatch::new).collect();
     let lastlen = last_chars.len() as u64;
+    let rvv_header = if RVV_256 {
+        let header: &[u8; 11] = filedata[0][..11].try_into().unwrap();
+        let expected = Batch::splat((fileheaders[0] ^ filedata[0][11]).into());
+        Some((header, expected))
+    } else {
+        None
+    };
 
     loop {
         let (pw, change, done) = password.next();
@@ -468,10 +480,27 @@ fn crack_simd(
             let state = last.state(ks);
             let offset = batch_index * LANES;
             let mut tkey = state;
-            for &byte in &filedata[0][..11] {
-                tkey.update(Batch::splat(byte.into()) ^ tkey.key3);
-            }
-            let expected = Batch::splat((fileheaders[0] ^ filedata[0][11]).into());
+            let expected = if let Some((header, expected)) = rvv_header {
+                // Measured on the RV2: LLVM leaves the loop rolled up,
+                // and explicitly unrolling these eleven updates is faster.
+                tkey.update(Batch::splat(header[0].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[1].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[2].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[3].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[4].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[5].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[6].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[7].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[8].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[9].into()) ^ tkey.key3);
+                tkey.update(Batch::splat(header[10].into()) ^ tkey.key3);
+                expected
+            } else {
+                for &byte in &filedata[0][..11] {
+                    tkey.update(Batch::splat(byte.into()) ^ tkey.key3);
+                }
+                Batch::splat((fileheaders[0] ^ filedata[0][11]).into())
+            };
             let ok = tkey.key3.simd_eq(expected);
             if !ok.any() {
                 continue;

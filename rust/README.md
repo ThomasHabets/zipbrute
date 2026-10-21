@@ -36,7 +36,10 @@ replacing memory gathers with register permutations. Other targets keep the
 portable gather implementation. Keystream generation uses 16-bit SIMD products
 because only bits 8..15 are needed. After checking the first ZIP header in SIMD,
 it checks only surviving candidates against the remaining headers using scalar
-code. Results depend on the CPU and input.
+code. The 256-bit RVV path keeps the prefix CRC contribution scalar during key
+initialization, avoiding 64-bit gather offsets, and unrolls the eleven header
+updates. Both choices were benchmarked on the RV2. Results depend on the CPU and
+input.
 
 Run correctness tests with `cargo +nightly test` and
 `cargo +nightly test --release`.
