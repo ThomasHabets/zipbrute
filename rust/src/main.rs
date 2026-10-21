@@ -38,14 +38,21 @@ fn crc32_simd(x: Batch, c: Batch) -> Batch {
                 std::mem::transmute(std::array::from_fn::<_, 8, _>(|i| CRCTAB[i << 3]));
             let high: __m256i =
                 std::mem::transmute(std::array::from_fn::<_, 8, _>(|i| CRCTAB[(i & 3) << 6]));
-            let indices: [__m256i; LANES / 8] = std::mem::transmute(x ^ c);
-            let result = indices.map(|idx| {
+            let bytes: [__m256i; LANES / 8] = std::mem::transmute(c);
+            let inputs: [__m256i; LANES / 8] = std::mem::transmute(x);
+            // Complete each register's CRC before assembling the wide batch.
+            // This keeps intermediate vectors live for less time in the hot loop.
+            let result = std::array::from_fn::<_, { LANES / 8 }, _>(|i| {
+                let idx = _mm256_xor_si256(inputs[i], bytes[i]);
                 let a = _mm256_permutevar8x32_epi32(low, idx);
                 let b = _mm256_permutevar8x32_epi32(mid, _mm256_srli_epi32::<3>(idx));
                 let c = _mm256_permutevar8x32_epi32(high, _mm256_srli_epi32::<6>(idx));
-                _mm256_xor_si256(_mm256_xor_si256(a, b), c)
+                _mm256_xor_si256(
+                    _mm256_srli_epi32::<8>(inputs[i]),
+                    _mm256_xor_si256(_mm256_xor_si256(a, b), c),
+                )
             });
-            (x >> 8) ^ std::mem::transmute::<[__m256i; LANES / 8], Batch>(result)
+            std::mem::transmute::<[__m256i; LANES / 8], Batch>(result)
         }
     }
     #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
